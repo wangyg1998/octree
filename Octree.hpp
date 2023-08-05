@@ -249,6 +249,15 @@ public:
 	/** \brief remove all data inside the octree. **/
 	void clear();
 
+	bool getPtsInFirstDividedOctant(int octantIndex, std::vector<uint32_t>& pts);
+
+	template <typename Distance>
+	bool radiusSearchLimitInOneOctant(int octantIndex, const PointT& query, float radius, std::vector<uint32_t>& resultIndices) const;
+
+	template <typename Distance>
+	bool radiusSearchLimitInOneOctant(int octantIndex, const PointT& query, float radius, std::vector<uint32_t>& resultIndices, std::vector<float>& distances)
+	    const;
+
 	/** \brief radius neighbor queries where radius determines the maximal radius of reported indices of points in
    * resultIndices **/
 	template <typename Distance>
@@ -530,6 +539,100 @@ void Octree<PointT, ContainerT>::clear()
 	root_ = 0;
 	data_ = 0;
 	successors_.clear();
+}
+
+template <typename PointT, typename ContainerT>
+bool Octree<PointT, ContainerT>::getPtsInFirstDividedOctant(int octantIndex, std::vector<uint32_t>& pts)
+{
+	if (octantIndex < 0 || octantIndex > 7)
+	{
+		return false;
+	}
+
+	Octant* octant = root_->child[octantIndex];
+	if (!octant || octant->size < 1)
+	{
+		return false;
+	}
+	pts.clear();
+	pts.reserve(octant->size);
+
+	uint32_t idx = octant->start;
+	for (uint32_t i = 0; i < octant->size; ++i)
+	{
+		pts.push_back(idx);
+		idx = successors_[idx];
+	}
+
+	return true;
+}
+
+template <typename PointT, typename ContainerT>
+template <typename Distance>
+bool Octree<PointT, ContainerT>::radiusSearchLimitInOneOctant(int octantIndex, const PointT& query, float radius, std::vector<uint32_t>& resultIndices) const
+{
+	resultIndices.clear();
+	if (root_ == 0)
+	{
+		return false;
+	}
+	float sqrRadius = Distance::sqr(radius);
+
+	Octant* octant = nullptr;
+	for (uint32_t c = 0; c < 8; ++c)
+	{
+		if (root_->child[c] == 0)
+		{
+			continue;
+		}
+		if (overlaps<Distance>(query, radius, sqrRadius, root_->child[c]))
+		{
+			octant = root_->child[c];
+			if (c != octantIndex)
+			{
+				return false;
+			}
+		}
+	}
+
+	radiusNeighbors<Distance>(octant, query, radius, sqrRadius, resultIndices);
+	return true;
+}
+
+template <typename PointT, typename ContainerT>
+template <typename Distance>
+bool Octree<PointT, ContainerT>::radiusSearchLimitInOneOctant(int octantIndex,
+                                                              const PointT& query,
+                                                              float radius,
+                                                              std::vector<uint32_t>& resultIndices,
+                                                              std::vector<float>& distances) const
+{
+	resultIndices.clear();
+	if (root_ == 0)
+	{
+		return false;
+	}
+	float sqrRadius = Distance::sqr(radius);
+
+	Octant* octant = nullptr;
+	for (uint32_t c = 0; c < 8; ++c)
+	{
+		if (root_->child[c] == 0)
+		{
+			continue;
+		}
+		if (overlaps<Distance>(query, radius, sqrRadius, root_->child[c]))
+		{
+			octant = root_->child[c];
+			if (c != octantIndex)
+			{
+				return false;
+			}
+		}
+	}
+
+	radiusNeighbors<Distance>(octant, query, radius, sqrRadius, resultIndices, distances);
+	return true;
 }
 
 template <typename PointT, typename ContainerT>
