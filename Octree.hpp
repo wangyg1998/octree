@@ -143,7 +143,7 @@ public:
 	/** \brief remove all data inside the octree. **/
 	void clear();
 
-	bool getPtsInFirstDividedOctant(int octantIndex, std::vector<uint32_t>& pts);
+	bool getOctantIndicesAtSpecifiedDepth(int depth, std::vector<std::vector<uint32_t>>& indicesList);
 
 	bool radiusSearchLimitInOneOctant(int octantIndex, const PointT& query, float radius, std::vector<uint32_t>& resultIndices) const;
 
@@ -207,6 +207,8 @@ protected:
    */
 	Octant* createOctant(float x, float y, float z, float extent, uint32_t startIdx, uint32_t endIdx, uint32_t size);
 
+	void getOctantChild(Octant* node, int depth, int targetDepth, std::vector<Octant*>& octantList);
+
 	/** @return true, if search finished, otherwise false. **/
 
 	bool findNeighbor(const Octant* octant, const PointT& query, float minDistance, float& maxDistance, int32_t& resultIndex) const;
@@ -258,7 +260,7 @@ protected:
 	const ContainerT* data_;
 
 	std::vector<uint32_t> successors_; // single connected list of next point indices...
-
+	std::vector<Octant*> octantList_;
 	friend class ::OctreeTest;
 };
 
@@ -435,29 +437,35 @@ void Octree<PointT, ContainerT>::clear()
 }
 
 template <typename PointT, typename ContainerT>
-bool Octree<PointT, ContainerT>::getPtsInFirstDividedOctant(int octantIndex, std::vector<uint32_t>& pts)
+bool Octree<PointT, ContainerT>::getOctantIndicesAtSpecifiedDepth(int depth, std::vector<std::vector<uint32_t>>& indicesList)
 {
-	if (octantIndex < 0 || octantIndex > 7)
+	if (depth < 1 || !root_)
 	{
 		return false;
 	}
-
-	Octant* octant = root_->child[octantIndex];
-	if (!octant || octant->size < 1)
+	octantList_.clear();
+	indicesList.clear();
+	getOctantChild(root_, 1, depth, octantList_);
+	indicesList.resize(octantList_.size());
+#pragma omp parallel for
+	for (int k = 0; k < octantList_.size(); ++k)
 	{
-		return false;
+		Octant* node = octantList_[k];
+		if (!node || node->size < 1)
+		{
+			continue;
+		}
+		std::vector<uint32_t>& indices = indicesList[k];
+		indices.reserve(node->size);
+		uint32_t idx = node->start;
+		for (uint32_t i = 0; i < node->size; ++i)
+		{
+			indices.push_back(idx);
+			idx = successors_[idx];
+		}
 	}
-	pts.clear();
-	pts.reserve(octant->size);
 
-	uint32_t idx = octant->start;
-	for (uint32_t i = 0; i < octant->size; ++i)
-	{
-		pts.push_back(idx);
-		idx = successors_[idx];
-	}
-
-	return true;
+	return !indicesList.empty();
 }
 
 template <typename PointT, typename ContainerT>
@@ -465,30 +473,22 @@ template <typename PointT, typename ContainerT>
 bool Octree<PointT, ContainerT>::radiusSearchLimitInOneOctant(int octantIndex, const PointT& query, float radius, std::vector<uint32_t>& resultIndices) const
 {
 	resultIndices.clear();
-	if (root_ == 0)
+	if (octantList_.size() < (octantIndex + 1))
 	{
 		return false;
 	}
-	float sqrRadius = radius * radius;
-
-	Octant* octant = nullptr;
-	for (uint32_t c = 0; c < 8; ++c)
+	if (!inside(query, radius, octantList_[octantIndex]))
 	{
-		if (root_->child[c] == 0)
+		float sqrRadius = radius * radius;
+		for (int i = 0; i < octantList_.size(); ++i)
 		{
-			continue;
-		}
-		if (overlaps(query, radius, sqrRadius, root_->child[c]))
-		{
-			octant = root_->child[c];
-			if (c != octantIndex)
+			if (i != octantIndex && overlaps(query, radius, sqrRadius, octantList_[i]))
 			{
 				return false;
 			}
 		}
 	}
-
-	radiusNeighbors(octant, query, radius, sqrRadius, resultIndices);
+	radiusNeighbors(octantList_[octantIndex], query, radius, radius * radius, resultIndices);
 	return true;
 }
 
@@ -501,31 +501,48 @@ bool Octree<PointT, ContainerT>::radiusSearchLimitInOneOctant(int octantIndex,
                                                               std::vector<float>& distances) const
 {
 	resultIndices.clear();
-	if (root_ == 0)
+	distances.clear();
+	if (octantList_.size() < (octantIndex + 1))
 	{
 		return false;
 	}
-	float sqrRadius = radius * radius;
-
-	Octant* octant = nullptr;
-	for (uint32_t c = 0; c < 8; ++c)
+	if (!inside(query, radius, octantList_[octantIndex]))
 	{
-		if (root_->child[c] == 0)
+		float sqrRadius = radius * radius;
+		for (int i = 0; i < octantList_.size(); ++i)
 		{
-			continue;
-		}
-		if (overlaps(query, radius, sqrRadius, root_->child[c]))
-		{
-			octant = root_->child[c];
-			if (c != octantIndex)
+			if (i != octantIndex && overlaps(query, radius, sqrRadius, octantList_[i]))
 			{
 				return false;
 			}
 		}
 	}
-
-	radiusNeighbors(octant, query, radius, sqrRadius, resultIndices, distances);
+	radiusNeighbors(octantList_[octantIndex], query, radius, radius * radius, resultIndices, distances);
 	return true;
+}
+
+template <typename PointT, typename ContainerT>
+void Octree<PointT, ContainerT>::getOctantChild(Octant* node, int depth, int targetDepth, std::vector<Octant*>& octantList)
+{
+	for (int i = 0; i < 8; ++i)
+	{
+		if (!node->child[i])
+		{
+			continue;
+		}
+		if (depth == targetDepth)
+		{
+			if (node->child[i]->size > 0)
+			{
+				octantList.push_back(node->child[i]);
+			}
+		}
+		else
+		{
+			getOctantChild(node->child[i], depth + 1, targetDepth, octantList);
+		}
+	}
+	return;
 }
 
 template <typename PointT, typename ContainerT>
